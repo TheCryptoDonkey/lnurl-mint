@@ -744,16 +744,17 @@ def test_withdraw_by_hash_rejects_an_unknown_hash(client: TestClient):
     assert result == {"status": "ERROR", "reason": "Unknown note."}
 
 
-def test_withdraw_by_hash_hides_that_a_note_was_already_spent(client: TestClient, mint_note):
+def test_withdraw_by_hash_reports_a_retained_spent_note(client: TestClient, mint_note):
     k1 = mint_note(5000)
     note_id = sha256(bytes.fromhex(k1)).hexdigest()
     new_k1, h = fresh_secret()
     assert client.get(f"/w/cb?k1={k1}&h={h}").json()["status"] == "OK"  # rotate, burns k1
-    # LUD-25 requires an unknown or burned h to receive the same response
-    # as an unknown k1. A direct lookup by the already-disclosed bearer
-    # secret may still distinguish spent from never issued.
-    assert client.get(f"/w?h={note_id}").json() == {"status": "ERROR", "reason": "Unknown note."}
-    assert client.get(f"/w?k1={k1}").json() == {"status": "ERROR", "reason": "Note already spent."}
+    # Both lookup forms report the retained spent record, while a never
+    # registered hash remains unknown. These reads do not reissue the note.
+    for lookup in (f"h={note_id}", f"k1={k1}"):
+        assert client.get(f"/w?{lookup}").json() == {"status": "ERROR", "reason": "Note already spent."}
+    assert notes.note_spent(note_id)
+    assert client.get(f"/w?h={urandom(32).hex()}").json() == {"status": "ERROR", "reason": "Unknown note."}
 
 
 def test_withdraw_requires_exactly_one_of_k1_or_h(client: TestClient, mint_note):
@@ -776,6 +777,24 @@ def test_withdraw_by_hash_reports_pending_the_same_way_k1_would(
     thread.join()
 
     assert pending == {"status": "ERROR", "reason": "pending"}
+    assert client.get(f"/w?h={note_id}").json() == {"status": "ERROR", "reason": "Note already spent."}
+    assert notes.note_spent(note_id)
+
+
+def test_failed_melt_restores_hash_lookup_value(client: TestClient, node: FakeNode, mint_note, monkeypatch):
+    k1 = mint_note(5000)
+    note_id = sha256(bytes.fromhex(k1)).hexdigest()
+    node.pay_delay = 0.3
+    node.fail_payments = True
+    thread = _melt_in_background(client, k1, fake_invoice(5000), monkeypatch)
+    pending = client.get(f"/w?h={note_id}").json()
+    thread.join()
+
+    assert pending == {"status": "ERROR", "reason": "pending"}
+    restored = client.get(f"/w?h={note_id}").json()
+    assert restored["maxWithdrawable"] == 5000
+    assert "k1" not in restored
+    assert not notes.note_spent(note_id)
 
 
 def test_withdraw_reports_unknown_k1_distinctly_from_spent(client: TestClient, mint_note):

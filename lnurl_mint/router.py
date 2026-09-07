@@ -787,8 +787,8 @@ async def get_withdraw(
     it's just a second way in for a lookup it can already do. The response
     then omits `k1` (see LnurlWithdrawResponse): the convenience that field
     normally serves doesn't apply to a caller who queried by hash, since it
-    already holds the raw k1. An unrecognized `h` - never registered or
-    already spent - gets the same response an unknown `k1` would.
+    already holds the raw k1. An unknown `h` gets the same response as an unknown `k1`. A retained
+    spent hash returns "Note already spent." with either lookup form.
 
     `amount` is accepted only because a note's URL encodes a
     (wallet-declared, unauthoritative) value as `?k1=...&amount=...` - it
@@ -809,10 +809,9 @@ async def get_withdraw(
     else:
         assert h is not None
         resolved = await _resolve_note_by_hash(h)
-        # LUD-25 deliberately makes an unknown and a burned `h`
-        # indistinguishable. Unlike a direct k1 lookup, a hash lookup must
-        # not reveal that this mint once held the note.
-        already_spent = False
+        # The hash already identifies the note: disclose its spent state,
+        # while keeping the spending secret off the wire.
+        already_spent = bool(HEX32_PATTERN.match(h) and notes.note_spent(h))
 
     if resolved is None:
         if already_spent:
