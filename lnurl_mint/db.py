@@ -1,5 +1,6 @@
 import sqlite3
 import threading
+import time
 from typing import Callable
 
 from .config import settings
@@ -126,6 +127,15 @@ class NoteStore:
             # 0, so a pre-migration row (correctly defaulted to 0) just costs
             # one such check the first time it's polled, same as before
             self._add_column_if_missing(self._conn, "melts", "settled", "INTEGER NOT NULL DEFAULT 0")
+            # NIP-57 zaps (see nostr.py): the kind 9734 request an invoice
+            # was bound to, verbatim, and the id of the kind 9735 receipt
+            # once one was published; both NULL for an ordinary mint.
+            # `created_at` bounds how long an unpaid zap invoice is polled
+            # for settlement - rows from before it get 0 and are never
+            # polled, which is right: they predate zaps entirely
+            self._add_column_if_missing(self._conn, "mints", "zap_request", "TEXT")
+            self._add_column_if_missing(self._conn, "mints", "zap_receipt", "TEXT")
+            self._add_column_if_missing(self._conn, "mints", "created_at", "INTEGER NOT NULL DEFAULT 0")
             self._conn.commit()
         return self._conn
 
@@ -139,7 +149,14 @@ class NoteStore:
         if column not in columns:
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl_suffix}")
 
-    def create_mint(self, payment_hash: str, pr: str, amount_msat: int, comment_hash: str | None = None) -> None:
+    def create_mint(
+        self,
+        payment_hash: str,
+        pr: str,
+        amount_msat: int,
+        comment_hash: str | None = None,
+        zap_request: str | None = None,
+    ) -> None:
         """Record an invoice whose preimage will become a bearer note worth
         `amount_msat` once the invoice settles (see settle_mint). Only the
         payment hash and the invoice itself (`pr`, for LUD-21 verify) are
@@ -154,7 +171,11 @@ class NoteStore:
         recording nothing, if `comment_hash` collides with an id already in
         use, either an outstanding note or another mint's comment_hash - a
         WALLET generating a fresh, unpredictable secret each time should
-        never hit this honestly."""
+        never hit this honestly.
+
+        `zap_request` is the NIP-57 kind 9734 the invoice was bound to,
+        verbatim, for the receipt published once it settles (see
+        unpublished_zaps)."""
         with self._lock, self.conn:
             if comment_hash is not None:
                 collision = self.conn.execute(
@@ -164,9 +185,37 @@ class NoteStore:
                 if collision:
                     raise ValueError("comment already in use")
             self.conn.execute(
-                "INSERT INTO mints (payment_hash, pr, amount_msat, comment_hash) VALUES (?, ?, ?, ?)",
-                (payment_hash, pr, amount_msat, comment_hash),
+                "INSERT INTO mints (payment_hash, pr, amount_msat, comment_hash, zap_request, created_at)"
+                " VALUES (?, ?, ?, ?, ?, ?)",
+                (payment_hash, pr, amount_msat, comment_hash, zap_request, int(time.time())),
             )
+
+    def pending_zap_mints(self, created_since: int) -> list[str]:
+        """Payment hashes of unpaid zap invoices created at or after
+        `created_since` (unix seconds) - what the settlement poll checks.
+        Older ones have expired as invoices and are left alone."""
+        rows = self.conn.execute(
+            "SELECT payment_hash FROM mints WHERE minted = 0 AND zap_request IS NOT NULL AND created_at >= ?",
+            (created_since,),
+        ).fetchall()
+        return [row[0] for row in rows]
+
+    def unpublished_zaps(self) -> list[tuple[str, str, str]]:
+        """(payment_hash, pr, zap_request) of every settled zap invoice
+        whose kind 9735 receipt has not reached a relay yet."""
+        rows = self.conn.execute(
+            "SELECT payment_hash, pr, zap_request FROM mints"
+            " WHERE minted = 1 AND zap_request IS NOT NULL AND zap_receipt IS NULL"
+        ).fetchall()
+        return [(row[0], row[1], row[2]) for row in rows]
+
+    def mark_zap_published(self, payment_hash: str, receipt_id: str) -> None:
+        with self._lock, self.conn:
+            self.conn.execute("UPDATE mints SET zap_receipt = ? WHERE payment_hash = ?", (receipt_id, payment_hash))
+
+    def zap_receipt_id(self, payment_hash: str) -> str | None:
+        row = self.conn.execute("SELECT zap_receipt FROM mints WHERE payment_hash = ?", (payment_hash,)).fetchone()
+        return row[0] if row else None
 
     def pending_mint(self, payment_hash: str) -> int | None:
         """amount_msat of the not-yet-minted invoice `payment_hash`, if any."""

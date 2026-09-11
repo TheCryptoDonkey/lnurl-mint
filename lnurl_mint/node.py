@@ -120,16 +120,29 @@ async def _dispatch(
 
 
 async def create_invoice(
-    amount_msat: int, config: LightningBackendConfig, memo: str = "lnurlcash mint"
+    amount_msat: int,
+    config: LightningBackendConfig,
+    memo: str = "lnurlcash mint",
+    description_for_hash: str | None = None,
 ) -> tuple[str, bytes | None]:
     """The preimage half of the result is None for the spark backend -
     its SSP generates and holds the preimage itself (see spark.py's
     module docstring), so there the caller takes the payment hash off
     the returned invoice instead of sha256(preimage); lnd/cln both let
     the caller supply the preimage, so those return it and nothing else
-    ever needs to."""
+    ever needs to.
+
+    `description_for_hash` commits the invoice to a text it does not
+    carry: the invoice gets `h` = sha256(text) in place of `d`, which is
+    how a NIP-57 zap invoice binds to its zap request. lnd and cln both
+    do it; spark cannot (see _create_invoice_spark)."""
     return await _dispatch(
-        "create_invoice", config, _create_invoice_lnd, _create_invoice_cln, amount_msat, trailing=(memo,)
+        "create_invoice",
+        config,
+        _create_invoice_lnd,
+        _create_invoice_cln,
+        amount_msat,
+        trailing=(memo, description_for_hash),
     )
 
 
@@ -222,19 +235,26 @@ async def is_invoice_settled(payment_hash: str, config: LightningBackendConfig) 
 
 
 async def _create_invoice_lnd(
-    amount_msat: int, url: str, macaroon: str, config: LightningBackendConfig, memo: str
+    amount_msat: int,
+    url: str,
+    macaroon: str,
+    config: LightningBackendConfig,
+    memo: str,
+    description_for_hash: str | None = None,
 ) -> tuple[str, bytes]:
     # lnd's AddInvoice never returns the preimage - it lets the caller supply
     # one instead (r_preimage), so generate it ourselves and use that: the
     # preimage *is* the bearer note k1 once the invoice settles, so the mint
     # must know it for certain regardless of what the backend reports
     preimage = urandom(32)
+    body: dict[str, str] = {"value_msat": str(amount_msat), "r_preimage": b64encode(preimage).decode()}
+    if description_for_hash is None:
+        body["memo"] = memo
+    else:
+        # lnd takes the hash itself; a memo alongside would be dropped
+        body["description_hash"] = b64encode(sha256(description_for_hash.encode()).digest()).decode()
     async with httpx.AsyncClient(verify=config.verify) as client:
-        res = await client.post(
-            f"{url}/v1/invoices",
-            headers={"Grpc-Metadata-macaroon": macaroon},
-            json={"value_msat": str(amount_msat), "memo": memo, "r_preimage": b64encode(preimage).decode()},
-        )
+        res = await client.post(f"{url}/v1/invoices", headers={"Grpc-Metadata-macaroon": macaroon}, json=body)
         await _raise_for_status(res)
         payment_request = res.json().get("payment_request")
     if not payment_request:
@@ -377,22 +397,27 @@ async def _sign_message_lnd(message: str, url: str, macaroon: str, config: Light
 
 
 async def _create_invoice_cln(
-    amount_msat: int, url: str, rune: str, config: LightningBackendConfig, memo: str
+    amount_msat: int,
+    url: str,
+    rune: str,
+    config: LightningBackendConfig,
+    memo: str,
+    description_for_hash: str | None = None,
 ) -> tuple[str, bytes]:
     # cln's `invoice` accepts a caller-supplied preimage too - same reasoning
     # as lnd above, generate it ourselves so we always know it for certain
     preimage = urandom(32)
+    body: dict[str, Any] = {
+        "amount_msat": amount_msat,
+        "label": urandom(16).hex(),
+        "description": memo if description_for_hash is None else description_for_hash,
+        "preimage": preimage.hex(),
+    }
+    if description_for_hash is not None:
+        # cln hashes the description it is given and puts only the hash on the invoice
+        body["deschashonly"] = True
     async with httpx.AsyncClient(verify=config.verify) as client:
-        res = await client.post(
-            f"{url}/v1/invoice",
-            headers={"Rune": rune},
-            json={
-                "amount_msat": amount_msat,
-                "label": urandom(16).hex(),
-                "description": memo,
-                "preimage": preimage.hex(),
-            },
-        )
+        res = await client.post(f"{url}/v1/invoice", headers={"Rune": rune}, json=body)
         await _raise_for_status(res)
         bolt11_str = res.json().get("bolt11")
     if not bolt11_str:

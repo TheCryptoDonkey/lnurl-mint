@@ -18,7 +18,7 @@ a reference wallet implementation (hosted at
 |-----------------|-------------------------------------------------------------------------------|
 | `GET /`         | one-pager frontend: mint QR code (LNURL of the LUD-16 address), lightning address, mint limits, node info incl. capacity and mempool.space/amboss.space links |
 | `GET /.well-known/lnurlp/{username}` | LUD-06 payRequest, extended with `withdrawLink` (the mint advertisement) - the mint is payable at `{USERNAME}@{BASE_URL host}` (or the reserved bare-domain `_@{BASE_URL host}`, see below), and this is its only payRequest entry point (no separate bare `/p`) |
-| `GET /p/cb`   | LUD-06 callback, invoice whose preimage becomes a note once paid - reports `disposable: false` ([LUD-11](../luds/11.md)): the lightning address itself is meant to be stored and reused |
+| `GET /p/cb`   | LUD-06 callback, invoice whose preimage becomes a note once paid - reports `disposable: false` ([LUD-11](../luds/11.md)): the lightning address itself is meant to be stored and reused. Takes a NIP-57 zap request as `nostr=` for a registered username, see "Zaps" below |
 | `GET /verify/{payment_hash}` | LUD-21, settlement status for an invoice minted via `/p/cb` or paid out by a melt via `/w/cb` ([LUD-25](../luds/25.md)) |
 | `GET /w` | LUD-03 withdrawRequest for a note (`?k1=`), informational, never burns       |
 | `GET /w/cb` | the mutating callback: melt (`pr`), rotate, split (`amount`), merge (many `k1`) |
@@ -195,6 +195,24 @@ A registered username is always stored lowercase and matched
 case-insensitively (same as `USERNAME` itself, see above) - `Alice`,
 `alice` and `ALICE` all resolve to the same identity regardless of which
 one a payer's client happened to send.
+
+**Zaps** ([NIP-57](https://github.com/nostr-protocol/nips/blob/master/57.md),
+optional): set `NOSTR_KEY` (32 bytes of hex, this mint's own Nostr key) and
+a registered username's payRequest carries `allowsNostr: true` and
+`nostrPubkey`. A zapping client then sends its kind 9734 zap request as
+`/p/cb?nostr=`; this mint checks it the way the NIP's Appendix D says (a
+valid signature, exactly one `p`, at most one `e`, a `relays` tag, an
+`amount` that matches), binds the invoice to it by description hash, and
+mints the note on the username's branch exactly as any other payment there.
+Once the invoice settles (polled every `ZAP_POLL_INTERVAL_SECONDS`, default
+5) it publishes the kind 9735 receipt, signed with `NOSTR_KEY`, to the relays
+the request named plus `NOSTR_RELAYS`, so the zap shows up in clients like
+any other. Publish-only: this mint never subscribes to a relay. It attests to
+what was paid, not to whom the payer meant it - it holds no Nostr key for a
+username, so `p` is whatever the zapper's client put there. Needs an lnd or
+cln funding source, the two that let a caller set an invoice's description
+hash; on spark zaps stay off. The fixed identity (`USERNAME`/`_`) is never
+zappable: it has no branch for the note to land on.
 
 **Verify** (optional, [LUD-21](../luds/21.md)): set `VERIFY_ENABLED=true` to
 serve `/verify/{payment_hash}` and advertise a `verify` URL in `/p/cb`'s

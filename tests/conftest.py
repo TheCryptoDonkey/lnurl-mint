@@ -83,6 +83,7 @@ class FakeNode:
         self.settled: set[str] = set()
         self.last_preimage: bytes = b""
         self.preimages: dict[str, bytes] = {}  # payment_hash -> preimage, for invoice_preimage
+        self.description_hashes: dict[str, str | None] = {}  # payment_hash -> description_for_hash
         self.melt_preimages: dict[str, bytes] = {}  # payment_hash -> preimage, for payment_preimage (LUD-25 verify)
         self.paid: list[str] = []
         self.fail_payments = False
@@ -125,11 +126,15 @@ class FakeNode:
     def pubkey(self) -> str:
         return self.identity_key.public_key.format(compressed=True).hex()
 
-    async def create_invoice(self, amount_msat: int, config, memo: str = "") -> tuple[str, bytes]:
+    async def create_invoice(
+        self, amount_msat: int, config, memo: str = "", description_for_hash: str | None = None
+    ) -> tuple[str, bytes]:
         preimage = urandom(32)
         self.last_preimage = preimage
         payment_hash = sha256(preimage).hexdigest()
         self.preimages[payment_hash] = preimage
+        # what a zap invoice was bound to, for the tests to check
+        self.description_hashes[payment_hash] = description_for_hash
         return fake_invoice(amount_msat, payment_hash), preimage
 
     async def is_invoice_settled(self, payment_hash: str, config) -> bool:
