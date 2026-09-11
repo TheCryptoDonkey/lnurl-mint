@@ -190,13 +190,14 @@ class NoteStore:
                 (payment_hash, pr, amount_msat, comment_hash, zap_request, int(time.time())),
             )
 
-    def pending_zap_mints(self, created_since: int) -> list[str]:
-        """Payment hashes of unpaid zap invoices created at or after
-        `created_since` (unix seconds) - what the settlement poll checks.
-        Older ones have expired as invoices and are left alone."""
+    def pending_zap_mints(self, created_since: int, limit: int) -> list[str]:
+        """Payment hashes of the `limit` newest unpaid zap invoices created
+        at or after `created_since` (unix seconds) - what the settlement
+        poll checks. Older ones are left alone."""
         rows = self.conn.execute(
-            "SELECT payment_hash FROM mints WHERE minted = 0 AND zap_request IS NOT NULL AND created_at >= ?",
-            (created_since,),
+            "SELECT payment_hash FROM mints WHERE minted = 0 AND zap_request IS NOT NULL AND created_at >= ?"
+            " ORDER BY created_at DESC LIMIT ?",
+            (created_since, limit),
         ).fetchall()
         return [row[0] for row in rows]
 

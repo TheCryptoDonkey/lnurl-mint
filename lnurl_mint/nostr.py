@@ -20,7 +20,11 @@ ZAP_REQUEST_KIND = 9734
 ZAP_RECEIPT_KIND = 9735
 
 _HEX32 = re.compile(r"^[0-9a-f]{64}$")
-_RELAY_URL = re.compile(r"^wss?://")
+# The request's relays are the zapper's choice, and this mint dials them:
+# TLS only, so a request cannot point it at a plain socket on a host it
+# can reach and the zapper cannot, and never more than a handful.
+_RELAY_URL = re.compile(r"^wss://[^/\s]+")
+_MAX_REQUEST_RELAYS = 8
 # one relay's share of a publish: dial, send, hear the OK (or not)
 _RELAY_TIMEOUT_SECONDS = 10
 
@@ -107,11 +111,15 @@ def validate_zap_request(raw: str, amount_msat: int) -> tuple[dict[str, Any] | N
 
 def relays_of(zap_request: dict[str, Any]) -> list[str]:
     """The relays the zap request asks the receipt to go to. NIP-57 puts
-    them all in ONE tag: ["relays", url, url, ...]."""
+    them all in ONE tag: ["relays", url, url, ...]. wss:// only, the
+    first _MAX_REQUEST_RELAYS distinct ones."""
     urls: list[str] = []
     for tag in _tags(zap_request, "relays"):
-        urls.extend(u for u in tag[1:] if _RELAY_URL.match(u))
-    return urls
+        for url in tag[1:]:
+            url = url.strip()
+            if _RELAY_URL.match(url) and url not in urls:
+                urls.append(url)
+    return urls[:_MAX_REQUEST_RELAYS]
 
 
 def zap_receipt(

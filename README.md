@@ -207,9 +207,13 @@ mints the note on the username's branch exactly as any other payment there.
 Once the invoice settles (polled every `ZAP_POLL_INTERVAL_SECONDS`, default
 5) it publishes the kind 9735 receipt, signed with `NOSTR_KEY`, to the relays
 the request named plus `NOSTR_RELAYS`, so the zap shows up in clients like
-any other. Publish-only: this mint never subscribes to a relay. It attests to
-what was paid, not to whom the payer meant it - it holds no Nostr key for a
-username, so `p` is whatever the zapper's client put there. Needs an lnd or
+any other. Publish-only: this mint never subscribes to a relay, dials only
+`wss://` relays and at most eight from a request, and polls only the newest
+hundred unpaid zap invoices of the last hour. It attests to what was paid,
+not to whom the payer meant it: it holds no Nostr key for a username, so `p`
+is whatever the zapper's client put there, and a receipt naming another
+username's owner here is one a client cannot tell from a real one. Every
+multi-user LNURL provider signing with one key has the same gap. Needs an lnd or
 cln funding source, the two that let a caller set an invoice's description
 hash; on spark zaps stay off. The fixed identity (`USERNAME`/`_`) is never
 zappable: it has no branch for the note to land on.

@@ -570,9 +570,14 @@ def _zaps_offered() -> bool:
     return settings.nostr_key is not None and settings.funding_source().backend in ("lnd", "cln")
 
 
-# an unpaid zap invoice is polled for settlement this long after it was
-# issued - longer than any invoice this mint issues lives
-_ZAP_POLL_WINDOW_SECONDS = 24 * 60 * 60
+# An unpaid zap invoice is polled for settlement this long after it was
+# issued, and only this many of the newest per round. A zapping client
+# pays at once or not at all, and anyone can mint unpaid zap invoices for
+# free (a self-signed request is a valid one), so the poll must not grow
+# with them. A zap paid outside the window still mints on the next
+# lookup or verify as any invoice does; it just gets no receipt.
+_ZAP_POLL_WINDOW_SECONDS = 60 * 60
+_ZAP_POLL_LIMIT = 100
 
 
 async def publish_zap_receipts(funding_source: LightningBackendConfig, now: int | None = None) -> int:
@@ -584,7 +589,7 @@ async def publish_zap_receipts(funding_source: LightningBackendConfig, now: int 
     and is retried next round. Run every ZAP_POLL_INTERVAL_SECONDS by
     server.py; returns how many receipts were published."""
     now = int(time.time()) if now is None else now
-    for payment_hash in notes.pending_zap_mints(now - _ZAP_POLL_WINDOW_SECONDS):
+    for payment_hash in notes.pending_zap_mints(now - _ZAP_POLL_WINDOW_SECONDS, _ZAP_POLL_LIMIT):
         await _mint_settled(payment_hash)
     published = 0
     assert settings.nostr_key is not None

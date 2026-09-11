@@ -5,6 +5,7 @@ invoice to it, and once the invoice settles the mint publishes a kind
 
 import asyncio
 import json
+import time
 from hashlib import sha256
 from os import urandom
 from typing import Any
@@ -207,6 +208,29 @@ def test_a_zap_request_without_relays_is_refused(client: TestClient, zaps):
 def test_the_fixed_identity_refuses_a_zap(client: TestClient, zaps):
     resp = client.get("/p/cb", params={"amount": 21_000, "nostr": json.dumps(_zap_request())})
     assert resp.json() == {"status": "ERROR", "reason": "Zaps are not offered for this address."}
+
+
+def test_the_request_cannot_point_the_mint_at_arbitrary_sockets():
+    request = _zap_request()
+    request["tags"] = [
+        ["p", "ab" * 32],
+        ["relays", "ws://127.0.0.1:9735", "http://relay.example", "wss://one.example", " wss://one.example"]
+        + [f"wss://r{i}.example" for i in range(20)],
+    ]
+    relays = nostr.relays_of(request)
+    assert relays[:1] == ["wss://one.example"]
+    assert len(relays) == 8
+    assert all(r.startswith("wss://") for r in relays)
+
+
+def test_the_settlement_poll_is_bounded(client: TestClient, node: FakeNode, zaps, monkeypatch):
+    username = _register(client)
+    for _ in range(3):
+        client.get("/p/cb", params={"amount": 21_000, "username": username, "nostr": json.dumps(_zap_request())})
+    monkeypatch.setattr(router_module, "_ZAP_POLL_LIMIT", 2)
+    assert len(notes.pending_zap_mints(0, router_module._ZAP_POLL_LIMIT)) == 2
+    # an invoice older than the window is not polled, however new the rest are
+    assert notes.pending_zap_mints(int(time.time()) + 10**9, 100) == []
 
 
 def test_zaps_stay_off_on_spark(client: TestClient, zaps, monkeypatch):
