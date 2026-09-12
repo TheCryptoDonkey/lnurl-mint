@@ -12,7 +12,7 @@ from .config import settings
 from .errors import log_internal_error
 from .frontend import frontend_router
 from .node import LightningBackendConfig, fetch_node_info
-from .router import reconcile_pending_melts, router
+from .router import publish_zap_receipts, reconcile_pending_melts, router
 
 
 async def _reconcile_pending_melts_safely(funding_source: LightningBackendConfig) -> None:
@@ -70,6 +70,19 @@ async def _monitor_funding_source(funding_source: LightningBackendConfig, health
         await _reconcile_pending_melts_safely(funding_source)
 
 
+async def _publish_zap_receipts_forever(funding_source: LightningBackendConfig) -> None:
+    """NIP-57: a zapping client waits on the kind 9735 receipt, and this
+    mint only learns an invoice settled by asking, so ask often (see
+    router.publish_zap_receipts; a round with nothing pending is one
+    cheap query). Cancelled from lifespan at shutdown."""
+    while True:
+        await asyncio.sleep(settings.zap_poll_interval_seconds)
+        try:
+            await publish_zap_receipts(funding_source)
+        except Exception as exc:
+            log_internal_error("publish_zap_receipts failed", exc)
+
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
     # LUD-25: a bearer note's k1 lives in the query string of /w and
@@ -101,6 +114,7 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
     # its own.
     funding_source = settings.funding_source()
     monitor_task: asyncio.Task | None = None
+    zap_task: asyncio.Task | None = None
     if not funding_source.backend:
         logging.warning(
             "No funding source configured (FUNDINGSOURCE_BACKEND unset) - "
@@ -132,13 +146,23 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
         # even if unreachable right now, this is what notices it recovering
         # later, or breaking again after a boot-time success (see issue #2)
         monitor_task = asyncio.create_task(_monitor_funding_source(funding_source, healthy))
+        if settings.nostr_key is not None:
+            if funding_source.backend in ("lnd", "cln"):
+                logging.info(f"NIP-57 zaps on: receipts signed as {settings.nostr_pubkey()}.")
+                zap_task = asyncio.create_task(_publish_zap_receipts_forever(funding_source))
+            else:
+                logging.warning(
+                    f"NOSTR_KEY is set but the {funding_source.backend} funding source cannot bind an invoice "
+                    "to a description hash - zaps stay off."
+                )
 
     yield
 
-    if monitor_task is not None:
-        monitor_task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await monitor_task
+    for task in (monitor_task, zap_task):
+        if task is not None:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
 
     # the spark backend's SDK singleton owns background tasks and its own
     # store (see spark.py) - disconnected here so they stop with the

@@ -3,6 +3,7 @@ import json
 import logging
 import re
 import threading
+import time
 from hashlib import sha256
 from http import HTTPStatus
 from typing import Awaitable, Callable
@@ -11,6 +12,7 @@ import bolt11
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Query, Request
 
 from . import bech32m, derivation
+from . import nostr as nostr_module
 from .config import settings
 from .db import PendingNoteError, notes
 from .error_handler import LnurlErrorResponseHandler
@@ -561,6 +563,51 @@ def _melt_fee_limit_msat(amount_msat: int) -> int:
     return max(round(amount_msat * 0.005), 5000, _mint_fee_msat(amount_msat))
 
 
+def _zaps_offered() -> bool:
+    """NIP-57 zaps need a Nostr key to sign receipts with and a funding
+    source that can bind an invoice to a description hash - lnd and cln
+    can, spark cannot (see spark._create_invoice_spark)."""
+    return settings.nostr_key is not None and settings.funding_source().backend in ("lnd", "cln")
+
+
+# An unpaid zap invoice is polled for settlement this long after it was
+# issued, and only this many of the newest per round. A zapping client
+# pays at once or not at all, and anyone can mint unpaid zap invoices for
+# free (a self-signed request is a valid one), so the poll must not grow
+# with them. A zap paid outside the window still mints on the next
+# lookup or verify as any invoice does; it just gets no receipt.
+_ZAP_POLL_WINDOW_SECONDS = 60 * 60
+_ZAP_POLL_LIMIT = 100
+
+
+async def publish_zap_receipts(funding_source: LightningBackendConfig, now: int | None = None) -> int:
+    """Settle every recently issued zap invoice the funding source says
+    was paid (the note lands on the username's branch exactly as any
+    other payment does), then publish a kind 9735 receipt for each
+    settled zap that has none yet: to the relays the zap request named
+    plus NOSTR_RELAYS. A receipt that no relay takes stays unpublished
+    and is retried next round. Run every ZAP_POLL_INTERVAL_SECONDS by
+    server.py; returns how many receipts were published."""
+    now = int(time.time()) if now is None else now
+    for payment_hash in notes.pending_zap_mints(now - _ZAP_POLL_WINDOW_SECONDS, _ZAP_POLL_LIMIT):
+        await _mint_settled(payment_hash)
+    published = 0
+    assert settings.nostr_key is not None
+    secret = settings.nostr_key.get_secret_value()
+    for payment_hash, pr, raw in notes.unpublished_zaps():
+        request = json.loads(raw)
+        preimage = await _mint_preimage(payment_hash)
+        receipt = nostr_module.zap_receipt(request, raw, pr, preimage, secret)
+        relays = list(dict.fromkeys(nostr_module.relays_of(request) + settings.nostr_relay_list()))
+        accepted = await nostr_module.publish(relays, receipt)
+        if not accepted:
+            logging.warning(f"zap receipt for {payment_hash} reached no relay of {relays}; will retry")
+            continue
+        notes.mark_zap_published(payment_hash, receipt["id"])
+        published += 1
+    return published
+
+
 def _known_username(username: str) -> bool:
     """LUD-16's reserved default username: `_` isn't user facing - it's
     what any WALLET/directory resolving a *bare-domain* address (no
@@ -682,12 +729,18 @@ def get_lnaddress(req: Request, username: str) -> LnurlPayResponse:
     # the payer's WALLET doesn't supply its own comment - see that
     # function's own docstring
     callback = f"{base}/p/cb" if _known_username(username) else f"{base}/p/cb?username={username}"
+    # NIP-57: a registered username can be zapped - the note lands on its
+    # own branch with no comment needed, and the receipt is what tells the
+    # zapper it landed. The fixed identity has no branch to land on.
+    zappable = _zaps_offered() and not _known_username(username)
     return LnurlPayResponse(
         callback=callback,
         minSendable=_min_sendable_msat(),
         maxSendable=settings.max_sendable_msat,
         metadata=metadata,
         withdrawLink=f"{base}/w",
+        allowsNostr=True if zappable else None,
+        nostrPubkey=settings.nostr_pubkey() if zappable else None,
     )
 
 
@@ -763,7 +816,11 @@ async def get_mint_address(req: Request, username: str) -> LnurlMintAddressRespo
 
 @router.get("/p/cb", tags=["lnurlcash"])
 async def get_pay_callback(
-    req: Request, amount: int, comment: str | None = None, username: str | None = None
+    req: Request,
+    amount: int,
+    comment: str | None = None,
+    username: str | None = None,
+    nostr: str | None = None,
 ) -> LnurlPayActionResponse:
     """LUD-06 callback: returns an invoice for `amount` msat whose preimage
     this mint generated itself (see node.create_invoice) - once the invoice
@@ -801,7 +858,14 @@ async def get_pay_callback(
     no node of its own poll settlement status - see verify_invoice. Safe to
     always offer now that every mint uses comment protection - the
     preimage verify_invoice could hand out is never the note's bearer
-    secret."""
+    secret.
+
+    `nostr` (NIP-57) is a zap request, a kind 9734 event as JSON, only
+    taken for a registered username on a mint with NOSTR_KEY set (see
+    _zaps_offered). Validated per the NIP's Appendix D, then the invoice
+    is bound to it by description hash and the request kept for the
+    receipt this mint publishes once the invoice settles (see
+    publish_zap_receipts)."""
     if settings.sunset_mint:
         raise HTTPException(HTTPStatus.BAD_REQUEST, "This mint is sunsetting - minting is disabled.")
     if amount < settings.min_sendable_msat:
@@ -827,6 +891,15 @@ async def get_pay_callback(
             raise HTTPException(HTTPStatus.NOT_FOUND, "Unknown user.")
         branch = bytes.fromhex(branch_hex)
 
+    zap_request: str | None = None
+    if nostr is not None:
+        if not _zaps_offered() or branch is None:
+            raise HTTPException(HTTPStatus.BAD_REQUEST, "Zaps are not offered for this address.")
+        _, problem = nostr_module.validate_zap_request(nostr, amount)
+        if problem is not None:
+            raise HTTPException(HTTPStatus.BAD_REQUEST, problem)
+        zap_request = nostr
+
     if comment is not None or branch is None:
         decoded_comment = _decode_note_ref(comment) if comment is not None else None
         if decoded_comment is None:
@@ -846,7 +919,10 @@ async def get_pay_callback(
         )
     funding_source = _funding_source()
     try:
-        pr, preimage = await create_invoice(amount, funding_source)
+        if zap_request is None:
+            pr, preimage = await create_invoice(amount, funding_source)
+        else:
+            pr, preimage = await create_invoice(amount, funding_source, description_for_hash=zap_request)
     except Exception as exc:
         # exc's own text (backend error bodies, connection info, ...) is
         # never handed back on the wire - see log_internal_error
@@ -863,7 +939,7 @@ async def get_pay_callback(
     # pays); the note it produces is credited net of the mint fee.
     payment_hash = sha256(preimage).hexdigest() if preimage is not None else _created_invoice_payment_hash(pr)
     try:
-        notes.create_mint(payment_hash, pr, net_amount_msat, comment_hash)
+        notes.create_mint(payment_hash, pr, net_amount_msat, comment_hash, zap_request=zap_request)
     except ValueError as exc:
         raise HTTPException(HTTPStatus.BAD_REQUEST, str(exc))
     # built from settings, not req.url_for (which is Host-header-derived,

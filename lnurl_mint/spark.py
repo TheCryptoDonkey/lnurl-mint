@@ -292,13 +292,21 @@ def _melt_idempotency_key(invoice: str) -> str | None:
 
 
 async def _create_invoice_spark(
-    amount_msat: int, config: LightningBackendConfig, memo: str = "lnurlcash mint"
+    amount_msat: int,
+    config: LightningBackendConfig,
+    memo: str = "lnurlcash mint",
+    description_for_hash: str | None = None,
 ) -> tuple[str, None]:
     # the SSP's bolt11 surface is sat-denominated - see the module
     # docstring for why fractional-sat amounts are rejected rather than
     # rounded
     if amount_msat % 1000:
         raise ValueError("The spark backend can only mint sat-aligned amounts.")
+    # the SDK's receive request has no description-hash field, so a zap
+    # invoice cannot be bound to its request here; router._zaps_offered
+    # keeps zaps off for this backend, this is the backstop
+    if description_for_hash is not None:
+        raise ValueError("The spark backend cannot commit an invoice to a description hash.")
     sdk = await _sdk(config)
     response = await sdk.receive_payment(
         request=ReceivePaymentRequest(

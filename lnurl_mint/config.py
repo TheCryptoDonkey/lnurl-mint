@@ -148,6 +148,21 @@ class Settings(BaseSettings):
     # single fixed identity, never a multi-tenant one.
     username_registration_enabled: bool = True
 
+    # NIP-57 zaps (optional): this mint's own Nostr key, 32 bytes of hex.
+    # Set, a registered username's payRequest advertises `allowsNostr` and
+    # `nostrPubkey`, /p/cb takes a kind 9734 zap request and commits the
+    # invoice to it, and once the invoice settles the mint publishes the
+    # kind 9735 receipt (see nostr.py). Publish-only: the mint subscribes
+    # to nothing. Needs an lnd or cln funding source, the two that let a
+    # caller set an invoice's description hash. Unset, zaps are off.
+    nostr_key: SecretStr | None = None
+    # relays every receipt is published to, comma separated, on top of the
+    # ones the zap request itself names
+    nostr_relays: str = ""
+    # how often settled zap invoices are looked for and their receipts
+    # published; a zapping client waits on the receipt, so keep it short
+    zap_poll_interval_seconds: int = Field(default=5, ge=1)
+
     # the one-pager frontend (GET /)
     title: str = "lnurl-mint"
     description: str = "A minimal lnurlcash mint - pay the QR code to mint a Lightning bearer note."
@@ -202,6 +217,23 @@ class Settings(BaseSettings):
                 f"MIN_SENDABLE_MSAT ({self.min_sendable_msat}) exceeds MAX_SENDABLE_MSAT ({self.max_sendable_msat})."
             )
         return self
+
+    @field_validator("nostr_key")
+    @classmethod
+    def _nostr_key_is_32_bytes_of_hex(cls, value: SecretStr | None) -> SecretStr | None:
+        if value is not None:
+            secret = value.get_secret_value()
+            if len(secret) != 64 or any(c not in "0123456789abcdefABCDEF" for c in secret):
+                raise ValueError("NOSTR_KEY must be 32 bytes of hex.")
+        return value
+
+    def nostr_pubkey(self) -> str | None:
+        from .nostr import pubkey_of
+
+        return pubkey_of(self.nostr_key.get_secret_value()) if self.nostr_key else None
+
+    def nostr_relay_list(self) -> list[str]:
+        return [r.strip() for r in self.nostr_relays.split(",") if r.strip()]
 
     def public_base_url(self, request_base_url: str) -> str:
         if self.onion_url:

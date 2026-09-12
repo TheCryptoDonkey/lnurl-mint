@@ -14,7 +14,11 @@ class LnurlPayResponse(BaseModel):
     spec's Security considerations (see router.get_pay_callback) - 64
     hex chars, exactly what's advertised here. `comment` is mandatory
     here (missing or malformed rejects the mint outright), unlike LUD-12's
-    own optional/free-text default use."""
+    own optional/free-text default use.
+
+    `allowsNostr`/`nostrPubkey` (NIP-57) are present only on a registered
+    username's payRequest of a mint with NOSTR_KEY set: the callback then
+    takes a zap request, and the key is what signs the receipt."""
 
     tag: Literal["payRequest"] = "payRequest"
     callback: str
@@ -23,6 +27,8 @@ class LnurlPayResponse(BaseModel):
     metadata: str
     withdrawLink: str
     commentAllowed: int = 64
+    allowsNostr: bool | None = None
+    nostrPubkey: str | None = None
 
 
 class LnurlPayActionResponse(BaseModel):
