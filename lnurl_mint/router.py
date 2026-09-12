@@ -835,11 +835,12 @@ async def get_pay_callback(
     redeems nothing, closing the routing-node preimage race the spec's
     Security considerations describes. `comment` is exactly that shape (or,
     per Part 2's Wallet-side ownership proofs, `cp1<pk>` - see
-    _decode_note_ref); a malformed one is rejected outright rather than
-    falling back to a preimage-keyed note, since a preimage-keyed note is
-    only as safe as the paying node's honesty about forwarding it: a
-    WALLET or route hop could otherwise observe the preimage before
-    settlement completes and steal the note.
+    _decode_note_ref); one of any other shape never falls back to a
+    preimage-keyed note, since a preimage-keyed note is only as safe as
+    the paying node's honesty about forwarding it: a WALLET or route hop
+    could otherwise observe the preimage before settlement completes and
+    steal the note. Without a `username` there is no other key to mint
+    under, so a comment of any other shape is rejected outright.
 
     `username` (get_lnaddress's own callback, never a payer's choice - see
     that function) identifies a Part 2 cx1-registered Lightning Address
@@ -850,9 +851,10 @@ async def get_pay_callback(
     branch itself (NoteStore.claim_next_index) and credits the note under
     it, exactly as if the payer's WALLET had supplied that same
     `comment=cp1<pk>` in person (25.md's Seed & derivation) - no WALLET
-    involvement needed at receive time at all. A comment is still honored
-    if the payer's WALLET supplies one anyway (e.g. the address owner
-    minting for themselves with a specific key already in hand).
+    involvement needed at receive time at all. A comment that names an
+    output is still honored; one that does not is the free text
+    `commentAllowed` asks for, and the branch key is used - wallets send
+    a comment because the address said they may.
 
     `verify` (LUD-21, only advertised if VERIFY_ENABLED) lets a wallet with
     no node of its own poll settlement status - see verify_invoice. Safe to
@@ -900,18 +902,18 @@ async def get_pay_callback(
             raise HTTPException(HTTPStatus.BAD_REQUEST, problem)
         zap_request = nostr
 
-    if comment is not None or branch is None:
-        decoded_comment = _decode_note_ref(comment) if comment is not None else None
-        if decoded_comment is None:
-            raise HTTPException(
-                HTTPStatus.BAD_REQUEST,
-                "Missing or malformed comment: a hex-encoded 32-byte hashed secret, "
-                "or a cp1<pubkey>, is required to mint.",
-            )
+    decoded_comment = _decode_note_ref(comment) if comment is not None else None
+    if decoded_comment is not None:
         comment_hash, _ = decoded_comment
+    elif branch is None:
+        raise HTTPException(
+            HTTPStatus.BAD_REQUEST,
+            "Missing or malformed comment: a hex-encoded 32-byte hashed secret, "
+            "or a cp1<pubkey>, is required to mint.",
+        )
     else:
-        # registered username, no comment supplied: auto-mint on this
-        # username's own branch (see this function's own docstring)
+        # registered username: mint on its own branch. A comment that
+        # names no output is free text, not an error (commentAllowed).
         branch_point, chain_code = branch[:32], branch[32:]
         assert username is not None
         comment_hash, _ = notes.claim_next_index(

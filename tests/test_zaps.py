@@ -237,3 +237,18 @@ def test_zaps_stay_off_on_spark(client: TestClient, zaps, monkeypatch):
     username = _register(client)
     monkeypatch.setattr(settings, "fundingsource_backend", "spark")
     assert "allowsNostr" not in client.get(f"/.well-known/lnurlp/{username}").json()
+
+
+def test_a_zap_carrying_a_comment_is_still_a_zap(client: TestClient, node: FakeNode, zaps):
+    """A zapping client sends the message as a LUD-12 comment too, empty
+    string included. It names no output, so it must not fail the zap."""
+    username = _register(client)
+    raw = json.dumps(_zap_request())
+    resp = client.get("/p/cb", params={"amount": 21_000, "username": username, "nostr": raw, "comment": ""}).json()
+    assert "pr" in resp, resp
+    payment_hash = sha256(node.last_preimage).hexdigest()
+    assert node.description_hashes[payment_hash] == raw
+
+    node.settled.add(payment_hash)
+    _receipts(node)
+    assert _receipt_for(zaps, resp["pr"]) is not None

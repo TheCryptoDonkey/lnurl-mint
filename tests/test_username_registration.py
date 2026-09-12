@@ -221,3 +221,45 @@ def test_automint_works_with_mixed_case_username_in_callback(client: TestClient,
     expected_id = derivation.derive_pubkey(branch_point, chain_code, 0).hex()
     data = client.get(f"/w?p={expected_id}").json()
     assert data.get("maxWithdrawable") == 5000, data
+
+
+def test_free_text_comment_still_mints_on_the_branch(client: TestClient, node: FakeNode):
+    """A registered address advertises commentAllowed, so wallets send
+    whatever the payer typed. It names no output, so the branch key is
+    used - rejecting it failed every ordinary LUD-12 payment."""
+    branch_point, chain_code, cx1 = _branch()
+    client.get(f"/register?username=pearl&cx1={cx1}")
+
+    pay_response = client.get("/p/cb", params={"username": "pearl", "amount": 5000, "comment": "thanks!"})
+    assert pay_response.json().get("pr"), pay_response.text
+    node.settled.add(_payment_hash(node))
+
+    assert _note_value(client, derivation.derive_pubkey(branch_point, chain_code, 0).hex()) == 5000
+
+
+def test_empty_comment_still_mints_on_the_branch(client: TestClient, node: FakeNode):
+    """What a wallet actually sends when the payer leaves the comment box
+    alone: `comment=`, not no comment at all."""
+    branch_point, chain_code, cx1 = _branch()
+    client.get(f"/register?username=quinn&cx1={cx1}")
+
+    pay_response = client.get("/p/cb", params={"username": "quinn", "amount": 5000, "comment": ""})
+    assert pay_response.json().get("pr"), pay_response.text
+    node.settled.add(_payment_hash(node))
+
+    assert _note_value(client, derivation.derive_pubkey(branch_point, chain_code, 0).hex()) == 5000
+
+
+def test_comment_naming_an_output_still_wins_over_the_branch(client: TestClient, node: FakeNode):
+    """The address owner minting for themselves with a key already in
+    hand: that comment names the output, so no branch index is claimed."""
+    branch_point, chain_code, cx1 = _branch()
+    client.get(f"/register?username=rosa&cx1={cx1}")
+    note_id = sha256(urandom(32)).hexdigest()
+
+    pay_response = client.get("/p/cb", params={"username": "rosa", "amount": 5000, "comment": note_id})
+    assert pay_response.json().get("pr"), pay_response.text
+    node.settled.add(_payment_hash(node))
+
+    assert _note_value(client, note_id) == 5000
+    assert _note_value(client, derivation.derive_pubkey(branch_point, chain_code, 0).hex()) is None
