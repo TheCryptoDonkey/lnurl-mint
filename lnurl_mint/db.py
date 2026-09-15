@@ -14,6 +14,14 @@ class PendingNoteError(Exception):
     {"status": "ERROR", "reason": "pending"} rather than a generic error."""
 
 
+class OutputCollisionError(ValueError):
+    """Raised when a replacement note id is already registered."""
+
+    def __init__(self, note_id: str) -> None:
+        super().__init__("Output already in use.")
+        self.note_id = note_id
+
+
 class NoteStore:
     """The set of outstanding bearer notes this mint has issued, plus the
     pending mints (invoices whose preimage becomes a note once paid).
@@ -347,10 +355,11 @@ class NoteStore:
         under the hash it was given. Raises ValueError - burning and
         minting nothing - if any burn id is unknown, already spent, or
         repeated (the second burn of a duplicate finds it spent by the
-        first), or if any mint id collides with an existing note (a
-        WALLET generating a fresh, unpredictable preimage each time
-        should never hit this honestly) OR with any invoice this mint
-        ever issued: a minted note's id IS its funding invoice's payment
+        first). Raises OutputCollisionError if any mint id is repeated or
+        collides with an existing note (a WALLET generating a fresh,
+        unpredictable preimage each time should never hit this honestly),
+        or ValueError if one collides with any invoice this mint ever
+        issued: a minted note's id IS its funding invoice's payment
         hash (see settle_mint), so a WALLET-chosen id planted under a
         *pending* invoice's payment hash would shadow that mint once paid
         and then block settle_mint's INSERT under the same key forever -
@@ -369,7 +378,11 @@ class NoteStore:
         with self._lock:
             try:
                 with self.conn:
+                    seen_burn_ids: set[str] = set()
                     for note_id in burn_ids:
+                        if note_id in seen_burn_ids:
+                            raise ValueError("Invalid or already spent k1.")
+                        seen_burn_ids.add(note_id)
                         row = self.conn.execute(
                             "SELECT pending FROM notes WHERE id = ? AND spent = 0", (note_id,)
                         ).fetchone()
@@ -377,13 +390,24 @@ class NoteStore:
                             raise ValueError("Invalid or already spent k1.")
                         if row[0]:
                             raise PendingNoteError("pending")
-                        self.conn.execute("UPDATE notes SET spent = 1 WHERE id = ?", (note_id,))
-                    for note_id, amount_msat in zip(mint_note_ids, mint_amounts):
+
+                    seen_mint_ids: set[str] = set()
+                    for note_id in mint_note_ids:
                         if self.conn.execute("SELECT 1 FROM mints WHERE payment_hash = ?", (note_id,)).fetchone():
                             # same known-safe message as any other invalid
                             # id - which table it collided with is nobody's
                             # business but the operator's
                             raise ValueError("Invalid or already spent k1.")
+                        if (
+                            note_id in seen_mint_ids
+                            or self.conn.execute("SELECT 1 FROM notes WHERE id = ?", (note_id,)).fetchone()
+                        ):
+                            raise OutputCollisionError(note_id)
+                        seen_mint_ids.add(note_id)
+
+                    for note_id in burn_ids:
+                        self.conn.execute("UPDATE notes SET spent = 1 WHERE id = ?", (note_id,))
+                    for note_id, amount_msat in zip(mint_note_ids, mint_amounts):
                         self.conn.execute("INSERT INTO notes (id, amount_msat) VALUES (?, ?)", (note_id, amount_msat))
                     self.conn.execute(
                         "INSERT INTO burns (burn_key, h, h2, amount1_msat, amount2_msat) VALUES (?, ?, ?, ?, ?)",
