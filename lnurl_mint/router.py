@@ -14,7 +14,7 @@ from fastapi import APIRouter, BackgroundTasks, HTTPException, Query, Request
 from . import bech32m, derivation
 from . import nostr as nostr_module
 from .config import settings
-from .db import PendingNoteError, notes
+from .db import OutputCollisionError, PendingNoteError, notes
 from .error_handler import LnurlErrorResponseHandler
 from .errors import log_internal_error
 from .mint_log import log_melt, log_mint
@@ -1551,6 +1551,10 @@ async def get_withdraw_callback(
         return WithdrawSuccessResponse(
             sig=await _certificate(p1_id, merged_amount, p1_is_cp1, settings.funding_source())
         )
+    except OutputCollisionError as exc:
+        if (exc.note_id == p1_id and p1_is_cp1) or (exc.note_id == p2_id and p2_is_cp1):
+            raise HTTPException(HTTPStatus.BAD_REQUEST, str(exc))
+        raise HTTPException(HTTPStatus.BAD_REQUEST, "Invalid or already spent k1.")
     except PendingNoteError:
         raise HTTPException(HTTPStatus.BAD_REQUEST, "pending")
     except ValueError as exc:

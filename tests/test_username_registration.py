@@ -348,7 +348,7 @@ def test_internal_transfer_to_a_stale_index_is_rejected_like_any_collision(
 
     second_k1 = mint_note(2000)
     resp = client.get(f"/w/cb?k1={second_k1}&p1={cp1}")
-    assert resp.json()["status"] == "ERROR"
+    assert resp.json() == {"status": "ERROR", "reason": "Output already in use."}
     # the first transfer's note is untouched, the second sender's note
     # was never burned
     assert _note_value(client, pk0.hex()) == 3000
