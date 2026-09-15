@@ -263,9 +263,7 @@ def test_a_zap_with_an_empty_lud12_comment_still_gets_a_receipt(client: TestClie
     the address. It must not block the zap or its receipt."""
     username = _register(client)
     raw = json.dumps(_zap_request())
-    response = client.get(
-        f"/p/{username}", params={"amount": 21_000, "nostr": raw, "comment": ""}
-    ).json()
+    response = client.get(f"/p/{username}", params={"amount": 21_000, "nostr": raw, "comment": ""}).json()
     assert "pr" in response, response
     payment_hash = sha256(node.last_preimage).hexdigest()
     assert node.description_hashes[payment_hash] == raw
